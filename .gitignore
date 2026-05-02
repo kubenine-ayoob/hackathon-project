@@ -1,11 +1,64 @@
+# --- OS & editor ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# --- Environment & secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Python ---
 .venv/
+venv/
 __pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
 *.egg-info/
+.eggs/
 dist/
 build/
-.env
-uploads/*.pdf
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# --- Terraform ---
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+tfplan
+tfplan.*
+
+# Terraform-generated Lambda zip path (if used)
+terraform/build/
+
+# --- App runtime / uploads (do not ignore sample-invoices/) ---
+uploads/
+uploads/**/*.pdf
+
+# --- Archives ---
 lambda.zip
+
+# --- Logs ---
+*.log

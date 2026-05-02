@@ -20,12 +20,11 @@ terraform {
     }
   }
 
-  # Uncomment after you create the bucket/table (step in README comment below)
-  # backend "s3" {
-  #   bucket         = "hackthon-k9-intern-ayoob-tfstate"
-  #   key            = "stacknine/terraform.tfstate"
-  #   region         = "us-east-1"
-  #   dynamodb_table = "hackthon-k9-intern-ayoob-tflock"
-  #   encrypt        = true
-  # }
+  backend "s3" {
+    bucket         = "hackthon-k9-intern-ayoob-tfstate"
+    key            = "stacknine/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "hackthon-k9-intern-ayoob-tflock"
+    encrypt        = true
+  }
 }
