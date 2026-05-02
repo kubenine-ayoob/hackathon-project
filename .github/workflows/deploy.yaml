@@ -1,0 +1,62 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Terraform Init
+        run: terraform init
+        # If remote backend: terraform init -backend-config="bucket=..." etc.
+
+      - name: Login ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        env:
+          PREFIX: hackthon-k9-intern-alice   # must match terraform.tfvars name_prefix
+        run: |
+          REGISTRY=${{ steps.ecr.outputs.registry }}
+          for svc in main-backend extractor parser; do
+            docker build -t "$PREFIX-$svc:latest" "../$svc"
+            docker tag "$PREFIX-$svc:latest" "$REGISTRY/$PREFIX-$svc:latest"
+            docker push "$REGISTRY/$PREFIX-$svc:latest"
+          done
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+
+      - name: Force new ECS deployment
+        run: |
+          PREFIX=hackthon-k9-intern-alice
+          CLUSTER="$PREFIX-cluster"
+          for svc in main-backend-service extractor-service parser-service; do
+            aws ecs update-service --cluster "$CLUSTER" --service "$PREFIX-$svc" --force-new-deployment --region "$AWS_REGION"
+          done
