@@ -18,6 +18,7 @@ resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
   }
 }
 
+
 resource "aws_cloudwatch_metric_alarm" "tg_main_unhealthy" {
   alarm_name          = "${var.name_prefix}-tg-mb-unhealthy"
   comparison_operator = "GreaterThanThreshold"
