@@ -33,7 +33,7 @@ resource "aws_subnet" "private_app" {
 resource "aws_subnet" "private_data" {
   count             = length(local.azs)
   vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 4, count.index + 20)
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 4, count.index + 12)
   availability_zone = local.azs[count.index]
 
   tags = { Name = "${var.name_prefix}-private-data-${local.azs[count.index]}" }

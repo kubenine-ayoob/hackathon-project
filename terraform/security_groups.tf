@@ -85,24 +85,6 @@ resource "aws_security_group_rule" "ecs_tasks_from_internal_alb_parse" {
   source_security_group_id = aws_security_group.alb_internal.id
 }
 
-resource "aws_security_group_rule" "internal_alb_to_extractor" {
-  type                     = "ingress"
-  security_group_id        = aws_security_group.ecs_tasks.id
-  from_port                = 8001
-  to_port                  = 8001
-  protocol                 = "tcp"
-  source_security_group_id = aws_security_group.alb_internal.id
-}
-
-resource "aws_security_group_rule" "internal_alb_to_parser" {
-  type                     = "ingress"
-  security_group_id        = aws_security_group.ecs_tasks.id
-  from_port                = 8002
-  to_port                  = 8002
-  protocol                 = "tcp"
-  source_security_group_id = aws_security_group.alb_internal.id
-}
-
 resource "aws_security_group" "rds" {
   name        = "${var.name_prefix}-rds-sg"
   description = "PostgreSQL"
