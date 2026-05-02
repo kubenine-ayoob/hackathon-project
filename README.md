@@ -2,205 +2,236 @@
 
 A microservices application that accepts invoice PDF uploads, extracts structured data from them, and presents the results through a web interface.
 
----
-
-## What This Application Does
-
-Users log in with an email address, upload an invoice PDF, and within a few seconds see the extracted data — invoice number, vendor, date, total, and line items — displayed on screen.
-
-The processing pipeline runs asynchronously. After upload, the user is immediately redirected to a results page that refreshes every three seconds until the job completes.
+This repository contains the **application source** and **Terraform** for deploying it on **AWS** (ECS Fargate, RDS, S3, Lambda, ALB, etc.).
 
 ---
 
-## Architecture
+## What the application does
 
-The application is split into three independent Python services:
+Users sign in with an email address, upload an invoice PDF, and see extracted fields (invoice number, vendor, date, total, line items) on a results page. The pipeline is **asynchronous**: after upload, the user is redirected to a page that polls until the job is **done**.
+
+---
+
+## Architecture overview
+
+### Logical application (three services + database)
 
 | Service | Port | Role |
-|---|---|---|
-| `main-backend` | 8000 | Serves the web UI, handles uploads, orchestrates the pipeline |
-| `extractor` | 8001 | Extracts raw text from a PDF using pdfplumber |
-| `parser` | 8002 | Parses structured invoice fields from raw text using regex |
+|---------|------|------|
+| `main-backend` | 8000 | Web UI (HTML), uploads, orchestrates `/process` |
+| `extractor` | 8001 | Downloads PDF (S3 or local path), extracts text with **pdfplumber**, stores raw text in PostgreSQL |
+| `parser` | 8002 | Reads raw text from PostgreSQL, parses fields with regex, writes structured invoice + line items |
 
-All three services share a single PostgreSQL database. The database schema is in `db/init.sql`.
+Schema: `db/init.sql` (tables: `jobs`, `raw_text`, `invoices`, `line_items`).
 
-```
-                        ┌─────────────┐
-          Browser ──────►  main-backend │
-                        │   port 8000  │
-                        └──────┬──────┘
-                               │
-               ┌───────────────┼───────────────┐
-               ▼               ▼               ▼
-         PostgreSQL       extractor         parser
-          (port 5432)    (port 8001)      (port 8002)
-```
+```mermaid
+flowchart TB
+  subgraph users["Users"]
+    B[Browser]
+  end
 
----
+  subgraph aws_public["Public edge"]
+    PUBALB[Internet-facing ALB :80]
+  end
 
-## How the Pipeline Works
+  subgraph vpc_private["VPC private subnets"]
+    subgraph ecs["ECS Fargate"]
+      MB[main-backend :8000]
+      EX[extractor :8001]
+      PR[parser :8002]
+    end
+    INTALB[Internal ALB :80]
+    RDS[(RDS PostgreSQL 15)]
+  end
 
-### Local Mode
+  subgraph data["Data & events"]
+    S3[(S3 uploads bucket KMS)]
+    L[Lambda S3 handler]
+    SSM[(SSM Parameter Store)]
+  end
 
-```
-User uploads PDF
-      │
-      ▼
-main-backend saves file to shared volume
-main-backend creates job in DB → gets job_id
-main-backend calls POST /process/{job_id} on itself
-      │
-      ├──► POST /extract on extractor
-      │         reads file from shared volume
-      │         extracts raw text → saves to DB
-      │
-      └──► POST /parse on parser
-               reads raw text from DB
-               parses invoice fields → saves to DB
-               marks job status = "done"
-      │
-      ▼
-Results page shows extracted invoice data
-```
-
-### Production Mode (AWS)
-
-```
-User uploads PDF
-      │
-      ▼
-main-backend saves PDF to S3 uploads bucket
-      Key format: {job_id}/{filename}.pdf
-main-backend creates job in DB
-      │
-      ▼
-S3 fires ObjectCreated event
-      │
-      ▼
-Lambda receives event
-Lambda reads job_id from the S3 object key
-Lambda calls POST /process/{job_id} on main-backend via ALB
-      │
-      ├──► POST /extract on extractor
-      │         downloads PDF from S3 to /tmp/
-      │         extracts raw text → saves to DB
-      │
-      └──► POST /parse on parser
-               reads raw text from DB
-               parses invoice fields → saves to DB
-               marks job status = "done"
-      │
-      ▼
-Results page shows extracted invoice data
+  B --> PUBALB
+  PUBALB --> MB
+  MB --> INTALB
+  INTALB -->|"/extract*"| EX
+  INTALB -->|"/parse*"| PR
+  MB --> RDS
+  EX --> RDS
+  PR --> RDS
+  MB --> S3
+  EX --> S3
+  S3 --> L
+  L -->|POST /process/job_id| PUBALB
+  MB -. reads config/secrets .-> SSM
+  EX -. reads config/secrets .-> SSM
+  PR -. reads config/secrets .-> SSM
+  L -. main-backend URL .-> SSM
 ```
 
----
+**Design choices (short):**
 
-## Why We Designed It This Way
+- **Public ALB only** for browser HTTP; **internal ALB** for service-to-service paths `/extract` and `/parse` on the same host as `EXTRACTOR_URL` / `PARSER_URL` base URL.
+- **S3** for durable PDF storage on Fargate; **Lambda** bridges **S3 ObjectCreated** → **`POST /process/{job_id}`** so upload returns quickly (`ENV=production` in `main-backend`).
+- **SSM** holds DB settings, bucket name, service URLs, and ALB URL for Lambda (`/stacknine/...` paths; see table below).
+- **RDS** holds application data; endpoint is stored in SSM (`/stacknine/db-host`). Tasks run in private subnets with **NAT** for outbound AWS APIs.
 
-### Why S3 for file storage
+### Request flow (production on AWS)
 
-Fargate containers have ephemeral local storage. A task restart loses any file on disk. S3 is durable, shared across all services, and the natural source for event-driven triggers. Using S3 also removes the need for a shared volume between containers in production.
+```text
+1. Browser → Public ALB → main-backend
+2. Upload: main-backend writes S3 key {job_id}/{filename}.pdf, inserts job (pending)
+3. S3 event → Lambda(job_id from key) → POST {ALB}/process/{job_id}
+4. main-backend → Internal ALB/extract → extractor → DB (raw text)
+              → Internal ALB/parse  → parser    → DB (invoice, status done)
+5. Browser polls /results/{job_id} until done
+```
 
-### Why Lambda between S3 and the backend
+### Local development
 
-The upload HTTP request returns to the user immediately after saving to S3. Processing is decoupled and runs asynchronously. Lambda is the natural bridge between an S3 event and a backend API call — it requires no servers and costs nothing when idle.
-
-We considered placing an SNS topic between S3 and Lambda. SNS adds a retry layer: if Lambda fails or the backend is temporarily unavailable, SNS can attempt redelivery. For 100 users per month this is not strictly necessary, but it is a valid improvement to this architecture if reliability requirements increase.
-
-### Why three separate services
-
-Each service has a different resource profile. The extractor is CPU-intensive. The parser is lightweight. The main-backend handles HTTP connections. Separating them allows each to scale, restart, and fail independently without affecting the others.
-
-### Why SSM Parameter Store for all configuration
-
-Environment variables baked into task definitions are visible in plaintext in the AWS console and in CloudTrail logs. SSM SecureString parameters are encrypted at rest with KMS, access-controlled via IAM, and can be rotated without redeploying a service. All secrets and configuration in this application are read from SSM at container startup.
-
-### Why NLB for the database connection
-
-An NLB provides a stable DNS endpoint for TCP traffic. Rather than hardcoding the EC2 private IP (which changes if the instance is replaced), services connect to the NLB DNS name stored in SSM. The NLB forwards TCP port 5432 to the database instance.
-
----
-
-## Security Guardrails
-
-These apply to the infrastructure regardless of how it is designed:
-
-- S3 bucket must be private and encrypted at rest using KMS
-- SSM parameters containing secrets must use SecureString (KMS-encrypted)
-- No application configuration should be hardcoded in task definitions or Lambda — everything comes from SSM
-- IAM roles follow least privilege — each service has only the permissions it actually uses
-- Services should not be directly reachable from the internet
-- The database should not be directly reachable from the internet
-
----
-
-## Running Locally
+Uses **Docker Compose**: PostgreSQL + three services with `ENV=local`; upload triggers **`POST /process/{job_id}`** on localhost instead of Lambda.
 
 ```bash
-cd hackathon
 docker compose up --build
 ```
 
 | Service | URL |
-|---|---|
+|---------|-----|
 | Web UI | http://localhost:8000 |
-| Extractor API | http://localhost:8001 |
-| Parser API | http://localhost:8002 |
+| Extractor | http://localhost:8001 |
+| Parser | http://localhost:8002 |
 | PostgreSQL | localhost:5433 |
 
-### Running Tests
+Tests (from repo root):
 
 ```bash
-cd hackathon/extractor  && python -m pytest tests/
-cd hackathon/parser     && python -m pytest tests/
-cd hackathon/main-backend && python -m pytest tests/
+cd extractor   && python -m pytest tests/
+cd parser      && python -m pytest tests/
+cd main-backend && python -m pytest tests/
 ```
 
-### Sample Invoices
-
-Six sample PDFs are in `sample-invoices/` for testing the upload flow.
+Sample PDFs: `sample-invoices/`.
 
 ---
 
-## Repository Structure
+## AWS deployment (Terraform)
 
-```
-hackathon/
-├── db/
-│   └── init.sql              # PostgreSQL schema (4 tables)
-├── main-backend/
-│   ├── app/                  # FastAPI app, routes, DB layer, config
-│   ├── templates/            # HTML templates (login, upload, results, history)
-│   ├── Dockerfile
-│   └── requirements.txt
-├── extractor/
-│   ├── app/                  # FastAPI app, PDF extraction, DB layer
-│   ├── Dockerfile
-│   └── requirements.txt
-├── parser/
-│   ├── app/                  # FastAPI app, regex parser, DB layer
-│   ├── Dockerfile
-│   └── requirements.txt
-├── lambda/
-│   └── handler.py            # S3 event handler → calls /process/{job_id}
-├── sample-invoices/          # Six sample PDFs for testing
-├── docker-compose.yml        # Local development stack
+Infrastructure lives under **`terraform/`**. Naming follows the hackathon pattern: `hackthon-k9-intern-<your-name>-<resource>` (see `TASK-1.md`).
+
+### Prerequisites
+
+- AWS account, IAM Identity Center or IAM user able to create VPC, RDS, ECS, IAM, etc.
+- **Terraform** `>= 1.5`, **AWS CLI**, **Docker**
+- **S3 bucket + DynamoDB table** for remote state (or comment out `backend "s3"` in `terraform/versions.tf` for local state only)
+
+### Configure
+
+1. Copy and edit **`terraform/terraform.tfvars`**:
+
+   - `name_prefix` — e.g. `hackthon-k9-intern-alice`
+   - `github_repository` — **must match** the GitHub repo that runs Actions, e.g. `kubenine-ayoob/hackathon-project`, or OIDC will fail with `AssumeRoleWithWebIdentity`.
+
+2. **GitHub** → repository **Settings → Secrets and variables → Actions**  
+   - `AWS_ROLE_ARN` = value of `terraform output github_deploy_role_arn` after first successful apply.
+
+### Bootstrap order
+
+1. Create state bucket + lock table (if using S3 backend), then `terraform init`.
+2. `terraform apply` (from laptop or CI with admin-capable credentials).
+3. **Build and push** images from **repository root** (not `terraform/`):
+
+   ```bash
+   aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com
+   # use terraform output ecr_repositories for URIs
+   for svc in main-backend extractor parser; do
+     docker build -t <PREFIX>-$svc:latest ./$svc
+     docker tag <PREFIX>-$svc:latest <ECR_URI>/latest
+     docker push <ECR_URI>/latest
+   done
+   ```
+
+4. Force new ECS deployment so tasks pull `:latest` (or rely on `.github/workflows/deploy.yaml` after OIDC works).
+
+### Useful outputs
+
+| Output | Purpose |
+|--------|---------|
+| `public_alb_url` | Browser entry URL |
+| `github_deploy_role_arn` | GitHub secret `AWS_ROLE_ARN` |
+| `ecr_repositories` | Docker push targets |
+
+### CI/CD (GitHub Actions)
+
+Workflow: **`.github/workflows/deploy.yaml`** (on push to `main`):
+
+- OIDC → `configure-aws-credentials`
+- `terraform init` / `apply`
+- Build/push three images to ECR
+- `aws ecs update-service --force-new-deployment`
+
+**Important:** If `terraform apply` in CI runs with a **wrong** `github_repository`, it **updates the IAM trust policy** and the **next** workflow can fail OIDC even if the previous run “succeeded.” Keep `github_repository` exactly equal to `owner/repo` on GitHub.
+
+### SSM parameters (runtime)
+
+| Parameter | Type | Used by |
+|-----------|------|---------|
+| `/stacknine/db-host` | String | ECS tasks |
+| `/stacknine/db-name` | String | ECS tasks |
+| `/stacknine/db-user` | String | ECS tasks |
+| `/stacknine/db-password` | SecureString | ECS tasks |
+| `/stacknine/s3-bucket` | String | main-backend, extractor |
+| `/stacknine/extractor-url` | String | main-backend (internal ALB base URL) |
+| `/stacknine/parser-url` | String | main-backend (internal ALB base URL) |
+| `/stacknine/main-backend-url` | String | Lambda (`lambda/handler.py`) |
+
+Lambda code path is fixed to **`/stacknine/main-backend-url`**; keep that name or change the Lambda and IAM together.
+
+---
+
+## Repository layout
+
+```text
+├── db/init.sql                 # PostgreSQL schema
+├── main-backend/               # FastAPI UI + orchestration
+├── extractor/                  # PDF → text
+├── parser/                     # Text → structured invoice
+├── lambda/handler.py           # S3 → POST /process/{job_id}
+├── sample-invoices/            # Test PDFs
+├── docker-compose.yml          # Local stack
+├── terraform/                  # AWS infrastructure (VPC, ECS, RDS, …)
+├── .github/workflows/deploy.yaml
+├── TASK-1.md                   # Hackathon brief
 └── README.md
 ```
 
 ---
 
-## Configuration Reference
+## Security guardrails (AWS)
 
-All values below are read from SSM Parameter Store at runtime. The SSM paths used by this application:
+- S3 uploads bucket: **private**, **SSE-KMS** (or equivalent), block public access.
+- Secrets in **SSM SecureString**; ECS injects via **task `secrets`**, not plaintext in images.
+- **No public IPs** on Fargate tasks; **RDS** not publicly accessible.
+- **IAM**: separate task roles per service where possible; scope ARNs in policies for production hardening.
+- **ALB**: inbound HTTP(S) restricted as appropriate; ECS accepts traffic from ALB security groups only.
 
-| Parameter | Type | Description |
-|---|---|---|
-| `/stacknine/db-host` | String | PostgreSQL hostname or NLB DNS name |
-| `/stacknine/db-name` | String | Database name |
-| `/stacknine/db-user` | String | Database user |
-| `/stacknine/db-password` | SecureString | Database password |
-| `/stacknine/main-backend-url` | String | ALB URL — used by Lambda to reach the backend |
+---
 
-The Lambda function reads `/stacknine/main-backend-url` to know where to send the `POST /process/{job_id}` call. This value should be the ALB DNS name.
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---------|----------------|
+| GitHub `AssumeRoleWithWebIdentity` denied | `github_repository` in `terraform.tfvars` ≠ actual `owner/repo`, or `AWS_ROLE_ARN` wrong. Run `terraform apply` after fixing trust. |
+| Job stuck **pending** after upload | Lambda not invoked, Lambda error, or SSM **`main-backend-url`** wrong; check Lambda CloudWatch logs and S3 event notification. |
+| `terraform init` S3 backend error | State bucket or DynamoDB lock table missing in the backend region. |
+| ECS **CannotPullContainerError** | Images not pushed to ECR or wrong repo/tag. |
+
+---
+
+## References
+
+- **`TASK-1.md`** — full hackathon requirements, scoring, and naming convention.
+
+---
+
+## License / ownership
+
+Hackathon / internship project; adjust license and ownership per your organization.
