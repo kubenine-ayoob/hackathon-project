@@ -33,7 +33,6 @@ jobs:
 
       - name: Terraform Init
         run: terraform init
-        # If remote backend: terraform init -backend-config="bucket=..." etc.
 
       - name: Login ECR
         id: ecr
@@ -41,7 +40,7 @@ jobs:
 
       - name: Build and push images
         env:
-          PREFIX: hackthon-k9-intern-alice   # must match terraform.tfvars name_prefix
+          PREFIX: hackthon-k9-intern-alice   
         run: |
           REGISTRY=${{ steps.ecr.outputs.registry }}
           for svc in main-backend extractor parser; do
