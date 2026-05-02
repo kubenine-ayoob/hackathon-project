@@ -324,3 +324,57 @@ This is not required. But if you get the core infrastructure working with time t
 3. Be ready to walk through your entire architecture — diagram, decisions, tradeoffs
 
 **A well-justified simple design scores higher than a complex design you cannot explain.**
+
+---
+
+## Evaluation Criteria
+
+### 1. Infrastructure Approach
+- Did you use Terraform, the AWS console, CDK, or a combination — and can you explain why?
+- Is your code reproducible? A colleague should be able to run it on a fresh account and get a working stack
+- Is it organised and readable, or just a collection of commands?
+
+### 2. Documentation (your own README)
+- Did you write a README explaining what you built?
+- Does it include an architecture diagram or clear description?
+- Are your design decisions explained — not just **what** you built but **why**?
+- Are deployment steps clear enough for someone else to follow?
+- Are your assumptions written down?
+
+### 3. Best Practices
+- **Security:** S3 encrypted, secrets in SSM, no hardcoded passwords, no public IPs on ECS tasks
+- **Networking:** Right components in the right subnets, security groups restricted to minimum required ports
+- **IAM:** Each service has its own role, least privilege applied, no `*` in resource ARNs
+- **Naming:** All resources follow the convention `hackthon-k9-intern-<your-name>-*`
+- **Tagging:** Resources are tagged with environment, project, and owner
+- **No console drift:** If you used IaC, nothing important should exist that your code does not know about
+
+### 4. Observability and Operations
+- Logs flowing to CloudWatch for all three services and Lambda
+- Alarms configured — at minimum: unhealthy tasks, high CPU/memory, Lambda errors, ALB 5xx responses
+- Auto scaling on main-backend
+- Health checks passing on all target groups
+- Can you describe what happens operationally if one service goes down?
+
+### 5. Reusability and Extensibility
+- If a fourth service is added next week, how long does it take to wire it up?
+- Is there a clear pattern in your code that a new service can follow?
+- Are log groups, alarms, and scaling set up in a reusable way — or repeated manually for each service?
+
+### 6. Architecture Decisions — Live Walkthrough
+During the evaluation you will be asked to explain your choices. Be ready for:
+- Why EC2 vs Fargate for PostgreSQL?
+- Why did you design your subnets the way you did?
+- What encryption approach did you use for S3, and why?
+- How does Lambda reach the backend, and what happens if it is not ready?
+- What would you improve with more time?
+
+### 7. Application Works End-to-End
+- Open the URL, log in, upload a sample invoice from the `sample-invoices/` folder
+- Results page shows: invoice number, vendor, date, total, and line items
+- Pipeline completes within approximately 30 seconds
+
+### 8. Bonus — CI/CD Pipeline
+- A GitHub Actions workflow that builds images, pushes to ECR, and deploys to ECS
+- Triggered automatically on push to the main branch
+- No manual steps required after a merge
