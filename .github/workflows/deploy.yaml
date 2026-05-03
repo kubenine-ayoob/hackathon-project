@@ -29,33 +29,45 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.7.5
+          terraform_version: 1.9.8
 
-      - name: Terraform Init
+      - name: Terraform init
         run: terraform init
 
-      - name: Login ECR
+
+      - name: Create ECR repos
+        run: |
+          terraform apply -auto-approve \
+            -var-file=envs/dev.tfvars \
+            -target=module.kms \
+            -target=module.ecr
+
+
+      - name: Login to ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push images
         env:
-          PREFIX: hackthon-k9-intern-alice   
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          PREFIX: hackthon-k9-intern-alice
+          SHA: ${{ github.sha }}
         run: |
-          REGISTRY=${{ steps.ecr.outputs.registry }}
           for svc in main-backend extractor parser; do
-            docker build -t "$PREFIX-$svc:latest" "../$svc"
-            docker tag "$PREFIX-$svc:latest" "$REGISTRY/$PREFIX-$svc:latest"
-            docker push "$REGISTRY/$PREFIX-$svc:latest"
+            IMAGE="$REGISTRY/$PREFIX-$svc"
+            docker build -t "$IMAGE:$SHA" -t "$IMAGE:latest" "../$svc"
+            docker push "$IMAGE:$SHA"
+            docker push "$IMAGE:latest"
           done
 
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
 
-      - name: Force new ECS deployment
+      - name: Terraform apply
+        env:
+          SHA: ${{ github.sha }}
         run: |
-          PREFIX=hackthon-k9-intern-alice
-          CLUSTER="$PREFIX-cluster"
-          for svc in main-backend-service extractor-service parser-service; do
-            aws ecs update-service --cluster "$CLUSTER" --service "$PREFIX-$svc" --force-new-deployment --region "$AWS_REGION"
-          done
+          terraform apply -auto-approve \
+            -var-file=envs/dev.tfvars \
+            -var "image_tags={main-backend=\"$SHA\",extractor=\"$SHA\",parser=\"$SHA\"}"
+
+      - name: Show outputs
+        run: terraform output

@@ -4,10 +4,13 @@ import urllib.request
 import boto3
 
 def handler(event, context):
-    ssm = boto3.client("ssm", region_name=os.environ.get("AWS_REGION", "us-east-1"))
-    main_backend_url = ssm.get_parameter(
-        Name="/stacknine/main-backend-url", WithDecryption=False
-    )["Parameter"]["Value"]
+    main_backend_url = os.environ.get("MAIN_BACKEND_URL")
+    if not main_backend_url:
+        ssm_param = os.environ.get("MAIN_BACKEND_URL_SSM_PARAM", "/stacknine/main-backend-url")
+        ssm = boto3.client("ssm", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+        main_backend_url = ssm.get_parameter(
+            Name=ssm_param, WithDecryption=False
+        )["Parameter"]["Value"]
 
     for record in event.get("Records", []):
         key    = urllib.parse.unquote_plus(record["s3"]["object"]["key"])

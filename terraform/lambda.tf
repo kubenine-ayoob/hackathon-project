@@ -1,76 +1,50 @@
-data "archive_file" "lambda_zip" {
-  type        = "zip"
-  source_file = "${path.root}/../lambda/handler.py"
-  output_path = "${path.module}/build/lambda_process.zip"
-}
 
-resource "aws_iam_role" "lambda" {
-  name = "${var.name_prefix}-lambda-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-    }]
-  })
-}
+module "lambda_s3_process" {
+  source  = "terraform-aws-modules/lambda/aws"
+  version = "~> 7.20"
 
-resource "aws_iam_role_policy" "lambda" {
-  name = "${var.name_prefix}-lambda-policy"
-  role = aws_iam_role.lambda.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = [
-          "${aws_cloudwatch_log_group.lambda_process.arn}:*"
-        ]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter"]
-        Resource = [aws_ssm_parameter.main_backend_url.arn]
-      }
-    ]
-  })
-}
+  function_name = "${var.name_prefix}-s3-process"
+  description   = "Process S3 uploads"
+  handler       = "handler.handler"
+  runtime       = "python3.11"
+  timeout       = 60
+  memory_size   = 256
 
-resource "aws_lambda_function" "process" {
-  function_name    = "${var.name_prefix}-s3-process"
-  role               = aws_iam_role.lambda.arn
-  filename           = data.archive_file.lambda_zip.output_path
-  source_code_hash   = data.archive_file.lambda_zip.output_base64sha256
-  handler            = "handler.handler"
-  runtime            = "python3.11"
-  timeout            = 60
-  memory_size        = 256
+  source_path = "${path.module}/../lambda/handler.py"
 
-  logging_config {
-    log_format = "Text"
-    log_group  = aws_cloudwatch_log_group.lambda_process.name
+  environment_variables = {
+    MAIN_BACKEND_URL           = local.ssm_string_params["main-backend-url"]
+    MAIN_BACKEND_URL_SSM_PARAM = aws_ssm_parameter.this["main-backend-url"].name
   }
 
-  tags = { Name = "${var.name_prefix}-lambda-s3-process" }
+  attach_policy_statements = true
+  policy_statements = {
+    ssm_read = {
+      effect    = "Allow"
+      actions   = ["ssm:GetParameter"]
+      resources = [local.ssm_arns["main-backend-url"]]
+    }
+  }
+
+
+  cloudwatch_logs_retention_in_days = 14
 }
 
-resource "aws_lambda_permission" "s3" {
+resource "aws_lambda_permission" "s3_invoke" {
   statement_id  = "AllowS3Invoke"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.process.function_name
+  function_name = module.lambda_s3_process.lambda_function_name
   principal     = "s3.amazonaws.com"
-  source_arn    = aws_s3_bucket.uploads.arn
+  source_arn    = module.s3_uploads.s3_bucket_arn
 }
 
 resource "aws_s3_bucket_notification" "uploads" {
-  bucket = aws_s3_bucket.uploads.id
+  bucket = module.s3_uploads.s3_bucket_id
 
   lambda_function {
-    lambda_function_arn = aws_lambda_function.process.arn
+    lambda_function_arn = module.lambda_s3_process.lambda_function_arn
     events              = ["s3:ObjectCreated:*"]
   }
 
-  depends_on = [aws_lambda_permission.s3]
+  depends_on = [aws_lambda_permission.s3_invoke]
 }
