@@ -108,3 +108,4 @@ cd main-backend && python -m pytest tests/
 ---
 
 Hackathon brief and full requirements: **`TASK-1.md`**.
+
