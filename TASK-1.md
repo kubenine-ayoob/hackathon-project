@@ -16,6 +16,7 @@ You are joining as the first infrastructure engineer. Your job is to deploy this
 
 ---
 
+
 ## Application Architecture
 
 The application is made up of **three independent Python/FastAPI microservices** and a **PostgreSQL database**.
